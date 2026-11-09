@@ -48,7 +48,7 @@ app.add_middleware(
 
 @app.get("/")
 async def home():
-    return {"app": "StudyMate", "status": "running on docker"}
+    return {"app": "StudyMate", "status": "running on CI|CD"}
 
 
 # ---------------------------------------------------------------
