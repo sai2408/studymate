@@ -1,0 +1,8 @@
+venv/
+__pycache__/
+*.pyc
+.env
+studymate.db
+data/
+tests/
+.pytest_cache/
