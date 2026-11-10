@@ -1,28 +1,27 @@
 """
-StudyMate API - Day 5
-Topics: JWT authentication and task queues (background tasks)
+StudyMate API - Day 13
+NEW today: RAG - ask questions about your own notes (POST /ask)
 Run:  uvicorn main:app --reload
-NOTE: the tables changed today -> delete the old studymate.db before starting.
 """
-
-import os
 import asyncio
+import os
 import re
 import time
 from contextlib import asynccontextmanager
-
+from agent import StudyBuddy
+from auth import create_access_token, get_current_user, hash_password, verify_password
 import httpx
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, status
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlmodel import col, or_, select
 from sqlmodel.ext.asyncio.session import AsyncSession
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, status
-from fastapi.middleware.cors import CORSMiddleware
 
 from auth import create_access_token, get_current_user, hash_password, verify_password
 from database import engine, get_session, init_db
-from models import (ImportRequest, Note, NoteCreate, NoteRead, NoteUpdate, Token, User,
-                    UserCreate, UserRead)
+from models import (AskRequest, AskResponse, BuddyRequest, BuddyResponse, ImportRequest, Note,
+                    NoteCreate, NoteRead, NoteUpdate, Token, User, UserCreate, UserRead)
+from rag import ai_enabled, answer_question, delete_chunks, index_note
 
 
 @asynccontextmanager
@@ -31,12 +30,8 @@ async def lifespan(app: FastAPI):
     yield
 
 
-#app = FastAPI(title="StudyMate API", version="0.3", lifespan=lifespan)
-app = FastAPI(title="StudyMate API", version="0.4", lifespan=lifespan)
+app = FastAPI(title="StudyMate API", version="0.6", lifespan=lifespan)
 
-# ---------------------------------------------------------------
-# NEW: CORS - allow the browser app on another origin (port 5173) to call us
-# ---------------------------------------------------------------
 ALLOWED_ORIGINS = os.getenv("FRONTEND_URL", "http://localhost:5173,http://127.0.0.1:5173").split(",")
 app.add_middleware(
     CORSMiddleware,
@@ -46,14 +41,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 @app.get("/")
 async def home():
-    return {"app": "StudyMate", "status": "running on CI|CD"}
+    return {"app": "StudyMate", "status": "running"}
 
 
-# ---------------------------------------------------------------
-# NEW: Auth endpoints
-# ---------------------------------------------------------------
+# ---------------- Auth ----------------
 @app.post("/auth/signup", response_model=UserRead, status_code=201)
 async def signup(data: UserCreate, session: AsyncSession = Depends(get_session)):
     existing = await session.exec(select(User).where(User.email == data.email.lower()))
@@ -69,7 +63,6 @@ async def signup(data: UserCreate, session: AsyncSession = Depends(get_session))
 @app.post("/auth/login", response_model=Token)
 async def login(form: OAuth2PasswordRequestForm = Depends(),
                 session: AsyncSession = Depends(get_session)):
-    # OAuth2 form uses the field name "username" - we put the email in it
     result = await session.exec(select(User).where(User.email == form.username.lower()))
     user = result.first()
     if not user or not verify_password(form.password, user.hashed_password):
@@ -82,11 +75,9 @@ async def me(user: User = Depends(get_current_user)):
     return user
 
 
-# ---------------------------------------------------------------
-# NEW: Background task -> runs AFTER the response is sent
-# ---------------------------------------------------------------
+# ---------------- Background task ----------------
 async def count_words(note_id: int):
-    await asyncio.sleep(2)  # pretend this is slow work (e.g. AI processing)
+    await asyncio.sleep(2)
     async with AsyncSession(engine) as session:
         note = await session.get(Note, note_id)
         if note:
@@ -97,10 +88,7 @@ async def count_words(note_id: int):
             print(f"[background] note {note_id}: {words} words")
 
 
-# ---------------------------------------------------------------
-# Notes - now protected: every endpoint needs a logged-in user
-# and only sees that user's notes
-# ---------------------------------------------------------------
+# ---------------- Notes ----------------
 @app.post("/notes", response_model=NoteRead, status_code=status.HTTP_201_CREATED)
 async def create_note(data: NoteCreate, background: BackgroundTasks,
                       user: User = Depends(get_current_user),
@@ -110,6 +98,7 @@ async def create_note(data: NoteCreate, background: BackgroundTasks,
     await session.commit()
     await session.refresh(note)
     background.add_task(count_words, note.id)
+    background.add_task(index_note, note.id)      # NEW: chunk + embed for RAG
     return note
 
 
@@ -149,6 +138,7 @@ async def update_note(note_id: int, data: NoteUpdate, background: BackgroundTask
     await session.commit()
     await session.refresh(note)
     background.add_task(count_words, note.id)
+    background.add_task(index_note, note.id)      # NEW: re-index after editing
     return note
 
 
@@ -156,11 +146,12 @@ async def update_note(note_id: int, data: NoteUpdate, background: BackgroundTask
 async def delete_note(note_id: int, user: User = Depends(get_current_user),
                       session: AsyncSession = Depends(get_session)):
     note = await get_own_note(note_id, user, session)
+    await delete_chunks(session, note_id)          # NEW: remove its RAG chunks too
     await session.delete(note)
     await session.commit()
 
 
-# ---------------- Import from web pages (from Day 4) ----------------
+# ---------------- Import from web pages ----------------
 def html_to_text(html: str) -> str:
     text = re.sub(r"<(script|style).*?</\1>", " ", html, flags=re.S)
     text = re.sub(r"<[^>]+>", " ", text)
@@ -195,4 +186,30 @@ async def import_notes(data: ImportRequest, background: BackgroundTasks,
     for note in created:
         await session.refresh(note)
         background.add_task(count_words, note.id)
+        background.add_task(index_note, note.id)   # NEW
     return created
+
+
+# ---------------------------------------------------------------
+# NEW: Ask StudyMate (RAG)
+# ---------------------------------------------------------------
+@app.post("/ask", response_model=AskResponse)
+async def ask(data: AskRequest, user: User = Depends(get_current_user),
+              session: AsyncSession = Depends(get_session)):
+    if not ai_enabled():
+        raise HTTPException(status_code=503, detail="AI is not configured: add GEMINI_API_KEY to .env")
+    return await answer_question(session, user.id, data.question)
+
+
+
+# ---------------------------------------------------------------
+# NEW: Study Buddy agent
+# ---------------------------------------------------------------
+@app.post("/buddy", response_model=BuddyResponse)
+async def buddy(data: BuddyRequest, user: User = Depends(get_current_user),
+                session: AsyncSession = Depends(get_session)):
+    if not ai_enabled():
+        raise HTTPException(status_code=503, detail="AI is not configured: add GEMINI_API_KEY to .env")
+    agent = StudyBuddy(session, user.id)
+    history = [m.model_dump() for m in data.history]
+    return await agent.run(data.message, history)

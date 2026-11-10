@@ -1,7 +1,7 @@
-import type { Note, NoteInput } from "./types";
+import type { AskResponse, BuddyResponse, ChatMessage, Note, NoteInput } from "./types";
 
 // Backend address: from .env (VITE_API_URL) or local default
-const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
+const API_URL = (import.meta.env.VITE_API_URL ?? "http://localhost:8000").replace(/\/+$/, "");
 
 const TOKEN_KEY = "studymate_token";
 export const getToken = () => localStorage.getItem(TOKEN_KEY);
@@ -62,4 +62,15 @@ export function updateNote(id: number, changes: Partial<NoteInput>) {
 
 export function deleteNote(id: number) {
   return request<void>(`/notes/${id}`, { method: "DELETE" });
+}
+
+// ---------- AI: Ask StudyMate (RAG) ----------
+export function ask(question: string) {
+  return request<AskResponse>("/ask", { method: "POST", body: JSON.stringify({ question }) });
+}
+
+
+// ---------- AI: Study Buddy agent ----------
+export function askBuddy(message: string, history: ChatMessage[]) {
+  return request<BuddyResponse>("/buddy", { method: "POST", body: JSON.stringify({ message, history }) });
 }

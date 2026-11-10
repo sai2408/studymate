@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { clearToken, createNote, deleteNote, getMe, getNotes, getToken, updateNote } from "./api";
+import AskPanel from "./components/AskPanel";
+import BuddyChat from "./components/BuddyChat";
 import Login from "./components/Login";
 import NoteForm from "./components/NoteForm";
 import NoteList from "./components/NoteList";
@@ -13,6 +15,7 @@ export default function App() {
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [tab, setTab] = useState<"notes" | "ask" | "buddy">("notes");
 
   // Load the user's notes from the API whenever we log in or the search changes
   useEffect(() => {
@@ -76,10 +79,25 @@ export default function App() {
           <button className="secondary small" onClick={logout}>Log out</button>
         </div>
       </header>
+      <nav className="tabs">
+        <button className={tab === "notes" ? "" : "secondary"} onClick={() => setTab("notes")}>My notes</button>
+        <button className={tab === "ask" ? "" : "secondary"} onClick={() => setTab("ask")}>Ask StudyMate</button>
+        <button className={tab === "buddy" ? "" : "secondary"} onClick={() => setTab("buddy")}>Study Buddy</button>
+      </nav>
       {error && <p className="error">{error}</p>}
-      <NoteForm onAdd={addNote} />
-      <SearchBar value={search} onChange={setSearch} />
-      {loading ? <p className="info">Loading notes...</p> : <NoteList notes={notes} onUpdate={editNote} onDelete={removeNote} />}
+      {tab === "notes" && (
+        <>
+          <NoteForm onAdd={addNote} />
+          <SearchBar value={search} onChange={setSearch} />
+          {loading ? (
+            <p className="info">Loading notes...</p>
+          ) : (
+            <NoteList notes={notes} onUpdate={editNote} onDelete={removeNote} />
+          )}
+        </>
+      )}
+      {tab === "ask" && <AskPanel />}
+      {tab === "buddy" && <BuddyChat />}
     </main>
   );
 }
